@@ -15,7 +15,9 @@
 #   - Add English + Ukrainian keyboard layouts
 #   - Set Alt+Shift as layout switch
 #   - Set GRUB timeout to 60 seconds
+#   - Enable NVIDIA DRM modesetting
 #   - Install Firefox, Brave, Telegram, Steam, OBS Studio, Discord
+#   - Prepare official Proton Experimental download through Steam
 #   - Install G-Helper Linux
 #   - Disable automatic screen blanking
 #   - Disable automatic idle suspend
@@ -112,14 +114,18 @@ fi
 
 
 # ============================================================
-# REFRESH PACKAGE DATABASE
+# FULL UPDATE AFTER MULTILIB
+# ============================================================
+#
+# Do a complete upgrade again after enabling multilib.
+# Avoid a partial-upgrade state.
 # ============================================================
 
-print_step "Refreshing package databases"
+print_step "Refreshing package databases and completing full upgrade"
 
-sudo pacman -Sy --noconfirm
+sudo pacman -Syu --noconfirm
 
-print_success "Package databases refreshed."
+print_success "Package databases refreshed and system fully upgraded."
 
 
 # ============================================================
@@ -135,7 +141,8 @@ sudo pacman -S --needed --noconfirm \
     wget \
     unzip \
     xdg-utils \
-    jq
+    jq \
+    libnotify
 
 print_success "Core dependencies installed."
 
@@ -332,6 +339,73 @@ install_aur_package "brave-bin"
 
 
 # ============================================================
+# PROTON EXPERIMENTAL
+# ============================================================
+#
+# Valve distributes Proton Experimental through Steam itself.
+# Proton Experimental is Steam App ID 1493710.
+#
+# We prepare a one-shot GNOME autostart action that tells Steam
+# to install/download the official Proton Experimental tool on
+# the first graphical login after this setup. This avoids trying
+# to automate Steam account login inside the root/noninteractive
+# install process.
+#
+# ============================================================
+
+print_step "Preparing Proton Experimental"
+
+PROTON_AUTOSTART_DIR="$HOME/.config/autostart"
+PROTON_AUTOSTART_SCRIPT="$HOME/.local/bin/install-proton-experimental"
+PROTON_DESKTOP_FILE="$PROTON_AUTOSTART_DIR/install-proton-experimental.desktop"
+
+mkdir -p "$PROTON_AUTOSTART_DIR"
+mkdir -p "$HOME/.local/bin"
+
+cat > "$PROTON_AUTOSTART_SCRIPT" <<'EOF'
+#!/bin/bash
+
+MARKER="$HOME/.local/share/proton-experimental-install-done"
+STEAM_URL="steam://install/1493710"
+
+if [ -f "$MARKER" ]; then
+    exit 0
+fi
+
+mkdir -p "$HOME/.local/share"
+
+# Give the Steam client a moment to start if it is not already running.
+if command -v steam >/dev/null 2>&1; then
+    steam -silent >/dev/null 2>&1 &
+fi
+
+sleep 15
+
+# Ask Steam to install the official Proton Experimental tool.
+xdg-open "$STEAM_URL" >/dev/null 2>&1 || true
+
+# Do not repeat the request on every login.
+touch "$MARKER"
+rm -f "$HOME/.config/autostart/install-proton-experimental.desktop"
+EOF
+
+chmod +x "$PROTON_AUTOSTART_SCRIPT"
+
+cat > "$PROTON_DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Install Proton Experimental
+Comment=Trigger Steam to download Valve Proton Experimental
+Exec=$PROTON_AUTOSTART_SCRIPT
+Terminal=false
+X-GNOME-Autostart-enabled=true
+EOF
+
+print_success "Proton Experimental download trigger prepared."
+print_info "Steam will be asked to download the official Proton Experimental tool (App ID 1493710) after the first GNOME login."
+
+
+# ============================================================
 # G-HELPER LINUX
 # ============================================================
 #
@@ -503,30 +577,62 @@ print_success "Random wallpaper script created."
 # ============================================================
 #
 # Configure one shortcut only: Super+W
+#
+# Preserve any existing custom GNOME keybindings and replace only
+# our own entry if the script is run again.
 # ============================================================
 
 print_step "Configuring Super+W wallpaper shortcut"
 
 CUSTOM_KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/random-wallpaper/"
+CUSTOM_KEYBINDING_KEY="org.gnome.settings-daemon.plugins.media-keys"
+CUSTOM_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_KEYBINDING_PATH"
 
-# Note: this intentionally manages only our own custom keybinding.
-gsettings set \
-    org.gnome.settings-daemon.plugins.media-keys \
-    custom-keybindings \
-    "['$CUSTOM_KEYBINDING_PATH']"
+python - "$CUSTOM_KEYBINDING_KEY" "$CUSTOM_KEYBINDING_PATH" "$WALLPAPER_SCRIPT" <<'PY'
+import ast
+import subprocess
+import sys
+
+schema, our_path, command = sys.argv[1], sys.argv[2], sys.argv[3]
+
+result = subprocess.run(
+    ["gsettings", "get", schema, "custom-keybindings"],
+    text=True,
+    capture_output=True,
+    check=True,
+)
+
+raw = result.stdout.strip()
+
+try:
+    existing = ast.literal_eval(raw)
+except (ValueError, SyntaxError):
+    existing = []
+
+if not isinstance(existing, list):
+    existing = []
+
+existing = [item for item in existing if item != our_path]
+existing.append(our_path)
+
+subprocess.run(
+    ["gsettings", "set", schema, "custom-keybindings", str(existing)],
+    check=True,
+)
+PY
 
 gsettings set \
-    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_KEYBINDING_PATH" \
+    "$CUSTOM_SCHEMA" \
     name \
     "Random Wallpaper"
 
 gsettings set \
-    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_KEYBINDING_PATH" \
+    "$CUSTOM_SCHEMA" \
     command \
     "$WALLPAPER_SCRIPT"
 
 gsettings set \
-    "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_KEYBINDING_PATH" \
+    "$CUSTOM_SCHEMA" \
     binding \
     "<Super>w"
 
@@ -556,11 +662,13 @@ echo "  - English + Ukrainian layouts"
 echo "  - Alt+Shift switching"
 echo "  - Ukrainian locale"
 echo "  - GRUB timeout: 60 seconds"
+echo "  - NVIDIA DRM modesetting"
 echo "  - No automatic idle screen blanking"
 echo "  - No automatic idle suspend"
 echo "  - Lid close -> suspend"
 echo "  - ~/Pictures/Wallpaper"
 echo "  - Super+W -> random wallpaper"
+echo "  - Proton Experimental download trigger"
 echo
 echo "============================================================"
 echo
