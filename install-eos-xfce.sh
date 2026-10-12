@@ -1,199 +1,179 @@
 #!/usr/bin/env bash
-# EndeavourOS + Xfce setup for ASUS TUF F15 / Intel + NVIDIA
-# Based on deputat1k/installSoftArch, reworked to avoid unsafe automation.
-# Run as regular user INSIDE a running Xfce session AFTER installation.
+# EndeavourOS + Xfce desktop/gaming bootstrap. No disk/bootloader operations.
 set -Eeuo pipefail
+AUTO=0
+DEV=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes) AUTO=1 ;;
+    --dev) DEV=1 ;;
+    --help|-h) echo "Usage: bash install-eos-xfce.sh [--yes] [--dev]"; exit 0 ;;
+    *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+[[ $EUID -ne 0 ]] || { echo "Run as a normal user, not via sudo." >&2; exit 1; }
+command -v pacman >/dev/null || { echo "pacman not found" >&2; exit 1; }
+command -v xfconf-query >/dev/null || { echo "Xfce is not installed" >&2; exit 1; }
+case "${XDG_CURRENT_DESKTOP:-}" in *XFCE*|*Xfce*|*xfce*) ;; *)
+ echo "Log in to Xfce first." >&2; exit 1 ;; esac
+[[ -n "${DISPLAY:-}" ]] || { echo "Start an X11 Xfce session first." >&2; exit 1; }
 
-log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m[!] %s\033[0m\n' "$*" >&2; }
-die() { printf '\033[1;31m[ERROR] %s\033[0m\n' "$*" >&2; exit 1; }
-ask() {
-    local response
-    read -r -p "$1 [y/N]: " response || return 1
-    [[ "$response" =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
-[[ "$EUID" -ne 0 ]] || die 'Run without sudo (as your normal user).'
-command -v pacman >/dev/null || die 'pacman not found. This script is for EndeavourOS/Arch only.'
-command -v xfconf-query >/dev/null || die 'Xfce is missing. Choose Xfce during EndeavourOS installation.'
-[[ "${XDG_CURRENT_DESKTOP:-}" == *XFCE* || "${XDG_CURRENT_DESKTOP:-}" == *Xfce* ]] || \
-    die 'Log into an Xfce desktop session and then rerun this script.'
-[[ -n "${DISPLAY:-}" ]] || die 'An X11 Xfce session is required for desktop configuration.'
-
-log 'This setup does NOT format disks or change EFI/GRUB/Windows partitions.'
-log 'Review every pacman/AUR confirmation before proceeding.'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+mkdir -p "$HOME/.local/state/eos-xfce-setup"
+LOG_FILE="$HOME/.local/state/eos-xfce-setup/setup-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+log() { printf '\n==> %s\n' "$*"; }
+warn() { printf '[WARNING] %s\n' "$*" >&2; }
+trap 'rc=$?; printf "[ERROR] line %s, exit %s. Log: %s\n" "$LINENO" "$rc" "$LOG_FILE" >&2; exit "$rc"' ERR
+log "Setup started; log: $LOG_FILE"
+log "EFI, GRUB, Windows, fstab, disk partitioning and GPU BIOS modes are NEVER changed."
 sudo -v
+pacman_flags=()
+[[ $AUTO == 1 ]] && pacman_flags+=(--noconfirm)
 
-# multilib (required for Steam and 32-bit graphics libraries)
 if ! pacman-conf --repo-list | grep -qx multilib; then
-    log 'Enabling multilib repository (Steam)'
-    sudo cp -n /etc/pacman.conf /etc/pacman.conf.before-eos-xfce-setup
-    sudo sed -i '/^#\[multilib\]$/,/^#Include = \/etc\/pacman.d\/mirrorlist$/ s/^#//' /etc/pacman.conf
-    pacman-conf --repo-list | grep -qx multilib || die 'Could not enable multilib; inspect /etc/pacman.conf manually.'
+  log "Enable [multilib] for Steam / Proton"
+  sudo cp -n /etc/pacman.conf /etc/pacman.conf.before-eos-xfce-setup
+  sudo sed -i -E '/^[[:space:]]*#[[:space:]]*\[multilib\][[:space:]]*$/,/^[[:space:]]*#[[:space:]]*Include[[:space:]]*=[[:space:]]*\/etc\/pacman.d\/mirrorlist[[:space:]]*$/ s/^[[:space:]]*#[[:space:]]*//' /etc/pacman.conf
+  pacman-conf --repo-list | grep -qx multilib || {
+    echo "Cannot enable multilib automatically; inspect /etc/pacman.conf." >&2; exit 1;
+  }
 fi
-log 'Updating whole system (no partial upgrades)'
-sudo pacman -Syu
 
-# Only official repo packages. Skip missing names instead of failing the full transaction.
+log "Full system update"
+sudo pacman -Syu "${pacman_flags[@]}"
+
 packages=(
-    git base-devel curl wget jq unzip zip xdg-utils
-    firefox telegram-desktop discord obs-studio
-    steam lutris wine winetricks
-    gamemode lib32-gamemode mangohud lib32-mangohud
-    mesa lib32-mesa vulkan-intel lib32-vulkan-intel
-    vulkan-icd-loader lib32-vulkan-icd-loader
-    mesa-utils vulkan-tools
-    xfce4-whiskermenu-plugin xfce4-clipman-plugin
-    xfce4-screenshooter xfce4-taskmanager xfce4-power-manager
-    xfce4-pulseaudio-plugin pavucontrol thunar-archive-plugin
-    materia-gtk-theme papirus-icon-theme
-    btop fastfetch gparted gvfs tumbler
-    vlc mpv qbittorrent xarchiver
-    cups system-config-printer avahi ipp-usb
-    zram-generator
+  git base-devel curl wget jq unzip zip xdg-utils
+  firefox telegram-desktop discord obs-studio
+  steam lutris wine winetricks gamemode lib32-gamemode
+  mangohud lib32-mangohud mesa lib32-mesa
+  vulkan-intel lib32-vulkan-intel vulkan-icd-loader lib32-vulkan-icd-loader
+  nvidia-prime mesa-utils vulkan-tools
+  xfce4-whiskermenu-plugin xfce4-clipman-plugin xfce4-screenshooter
+  xfce4-taskmanager xfce4-power-manager xfce4-pulseaudio-plugin
+  pavucontrol thunar-archive-plugin
+  materia-gtk-theme papirus-icon-theme
+  btop fastfetch gparted gvfs tumbler
+  vlc mpv qbittorrent xarchiver
+  cups system-config-printer avahi ipp-usb zram-generator
+  python python-pip nodejs npm
 )
-
-log 'Checking packages against enabled official repositories'
+if [[ $DEV == 1 ]]; then
+  packages+=(jdk-openjdk maven php composer dotnet-sdk docker docker-compose)
+fi
 available=()
 for pkg in "${packages[@]}"; do
-    if pacman -Si "$pkg" >/dev/null 2>&1; then
-        available+=("$pkg")
-    else
-        warn "Package unavailable: $pkg (skipping)"
-    fi
+  if pacman -Si "$pkg" >/dev/null 2>&1; then
+    available+=("$pkg")
+  else
+    warn "Not found in enabled official repos; skipping: $pkg"
+  fi
 done
 if ((${#available[@]})); then
-    log 'Installing software — inspect the package list and confirm'
-    sudo pacman -S --needed "${available[@]}"
+  log "Installing ${#available[@]} packages"
+  sudo pacman -S --needed "${pacman_flags[@]}" "${available[@]}"
 fi
 
-# CUPS / network printer discovery
-if systemctl list-unit-files cups.service --no-legend 2>/dev/null | grep -q '^cups.service'; then
-    sudo systemctl enable --now cups.service
-fi
-if systemctl list-unit-files avahi-daemon.service --no-legend 2>/dev/null | grep -q '^avahi-daemon.service'; then
-    sudo systemctl enable --now avahi-daemon.service
-fi
-
-# Preserve the language chosen in the installer; generate an extra Ukrainian locale.
-if grep -q '^#uk_UA.UTF-8 UTF-8$' /etc/locale.gen; then
-    log 'Generating Ukrainian UTF-8 locale (system UI language unchanged)'
-    sudo sed -i 's/^#uk_UA.UTF-8 UTF-8$/uk_UA.UTF-8 UTF-8/' /etc/locale.gen
-    sudo locale-gen
+for svc in cups.service avahi-daemon.service; do
+  if systemctl list-unit-files "$svc" --no-legend 2>/dev/null | grep -q "^$svc"; then
+    sudo systemctl enable --now "$svc" || warn "Could not enable $svc"
+  fi
+done
+if grep -Eq '^#[[:space:]]*uk_UA.UTF-8[[:space:]]+UTF-8$' /etc/locale.gen; then
+  sudo sed -i -E 's/^#[[:space:]]*(uk_UA.UTF-8[[:space:]]+UTF-8)$/\1/' /etc/locale.gen
+  sudo locale-gen
 fi
 
-# Only user desktop settings; safe to run again.
 xfset() {
-    local channel="$1" property="$2" type="$3" value="$4"
-    if xfconf-query -c "$channel" -p "$property" >/dev/null 2>&1; then
-        xfconf-query -c "$channel" -p "$property" -s "$value"
-    else
-        xfconf-query -c "$channel" -p "$property" -n -t "$type" -s "$value"
-    fi
+  local channel="$1" prop="$2" type="$3" value="$4"
+  if xfconf-query -c "$channel" -p "$prop" >/dev/null 2>&1; then
+    xfconf-query -c "$channel" -p "$prop" -s "$value"
+  else
+    xfconf-query -c "$channel" -p "$prop" -n -t "$type" -s "$value"
+  fi
 }
+log "Xfce keyboard: US + Ukrainian via Alt+Shift"
+xfset keyboard-layout /Default/XkbDisable bool false || warn "Layout config failed"
+xfset keyboard-layout /Default/XkbLayout string us,ua || warn "Layout config failed"
+xfset keyboard-layout /Default/XkbOptions string grp:alt_shift_toggle || warn "Layout switch config failed"
 
-if ask 'Configure US+Ukrainian keyboard and Alt+Shift switching in Xfce?'; then
-    log 'Configuring Xfce keyboard layouts'
-    xfset keyboard-layout /Default/XkbDisable bool false
-    xfset keyboard-layout /Default/XkbLayout string 'us,ua'
-    xfset keyboard-layout /Default/XkbOptions string 'grp:alt_shift_toggle'
-fi
-
-if ask 'Apply Kali-inspired dark Xfce theme (Materia-dark + Papirus-Dark)?'; then
-    log 'Applying dark theme (inspired by Kali; NOT the original Kali theme)'
-    xfset xsettings /Net/ThemeName string Materia-dark
-    xfset xsettings /Net/IconThemeName string Papirus-Dark
-    if [[ -d /usr/share/themes/Materia-dark/xfwm4 ]]; then
-        xfset xfwm4 /general/theme string Materia-dark
-    fi
-fi
-
-log 'Creating a safe Xfce random-wallpaper helper'
+log "Random wallpaper helper and Super+W (does not overwrite existing shortcut)"
 mkdir -p "$HOME/.local/bin" "$HOME/Pictures/Wallpaper"
 cat > "$HOME/.local/bin/random-wallpaper-xfce" <<'WALLPAPER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 folder="$HOME/Pictures/Wallpaper"
-[[ -d "$folder" ]] || exit 0
 mapfile -d '' -t photos < <(find "$folder" -maxdepth 1 -type f \
-    \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) -print0)
-if ((${#photos[@]} == 0)); then
-    command -v notify-send >/dev/null && notify-send 'Wallpaper' 'Place images in ~/Pictures/Wallpaper'
-    exit 0
-fi
+  \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) -print0)
+(("${#photos[@]}" > 0)) || { echo "Put wallpapers in $folder"; exit 1; }
 photo="${photos[RANDOM % ${#photos[@]}]}"
 changed=0
 while IFS= read -r prop; do
-    [[ "$prop" == */last-image || "$prop" == */image-path ]] || continue
-    xfconf-query -c xfce4-desktop -p "$prop" -s "$photo"
-    changed=1
+  case "$prop" in
+    */last-image|*/image-path)
+      xfconf-query -c xfce4-desktop -p "$prop" -s "$photo" && changed=1 ;;
+  esac
 done < <(xfconf-query -c xfce4-desktop -l)
-if ((changed == 0)); then
-    printf 'Xfce backdrop properties were not detected; set one wallpaper in Desktop Settings first.\n' >&2
-    exit 1
-fi
-if command -v notify-send >/dev/null; then
-    notify-send 'Wallpaper' "$(basename "$photo")"
-fi
+((changed == 1)) || { echo "Set first wallpaper via Desktop Settings."; exit 1; }
 WALLPAPER
 chmod +x "$HOME/.local/bin/random-wallpaper-xfce"
-
-if ask 'Bind Super+W to random wallpapers (only if not already used)?'; then
-    shortcut='/commands/custom/<Super>w'
-    if xfconf-query -c xfce4-keyboard-shortcuts -p "$shortcut" >/dev/null 2>&1; then
-        warn 'Super+W already has an assignment. Not overwriting it; change via Xfce Keyboard settings.'
-    else
-        xfconf-query -c xfce4-keyboard-shortcuts -p "$shortcut" -n -t string \
-            -s "$HOME/.local/bin/random-wallpaper-xfce"
-    fi
+shortcut='/commands/custom/<Super>w'
+if ! xfconf-query -c xfce4-keyboard-shortcuts -p "$shortcut" >/dev/null 2>&1; then
+  xfconf-query -c xfce4-keyboard-shortcuts -p "$shortcut" -n -t string \
+    -s "$HOME/.local/bin/random-wallpaper-xfce" || warn "Shortcut could not be set"
+else
+  warn "Super+W already assigned; left unchanged"
 fi
 
-# Only configure zram if an existing setup is NOT present.
-if [[ ! -e /etc/systemd/zram-generator.conf ]] && ! swapon --noheadings --show=NAME | grep -q '^/dev/zram'; then
-    if ask 'Configure compressed zram swap (up to 8 GiB; active after reboot)?'; then
-        log 'Configuring zram (without replacing existing swap partition)'
-        printf '[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n' | \
-            sudo tee /etc/systemd/zram-generator.conf >/dev/null
-    fi
+if [[ ! -e /etc/systemd/zram-generator.conf ]] && \
+   [[ ! -d /etc/systemd/zram-generator.conf.d ]] && \
+   ! swapon --noheadings --show=NAME | grep -q '^/dev/zram'; then
+  log "Configuring zram swap for next reboot"
+  printf '[zram0]\nzram-size = min(ram / 2, 8192)\ncompression-algorithm = zstd\n' |
+    sudo tee /etc/systemd/zram-generator.conf >/dev/null
 else
-    warn 'Existing zram setup found; leaving it unchanged.'
+  log "Existing zram configuration kept"
 fi
 
 if mountpoint -q /mnt/games; then
-    if [[ -w /mnt/games ]]; then
-        log 'Second disk is mounted and writable: preparing user directories'
-        mkdir -p /mnt/games/{SteamLibrary,Videos,Downloads,Files}
-    else
-        warn '/mnt/games is mounted but not user-writable; check filesystem ownership.'
-    fi
+  if [[ -w /mnt/games ]]; then
+    mkdir -p /mnt/games/{SteamLibrary,Videos,Downloads,Files}
+  else
+    warn "/mnt/games is not writable"
+  fi
 else
-    warn 'Second disk is NOT mounted at /mnt/games — not creating directories on the OS disk.'
+  warn "/mnt/games not mounted: no directories are created on the system disk"
 fi
 
-if command -v nvidia-inst >/dev/null; then
-    log 'NVIDIA: showing a DRY RUN (no driver is changed by this script)'
-    nvidia-inst --test --prime --32 || warn 'Review NVIDIA driver status separately.'
-    printf '\nTo install/update ONLY IF NEEDED after checking the dry run:\n'
-    printf '  sudo nvidia-inst --prime --32\n'
+log "Kali visual theme"
+if [[ -f "$SCRIPT_DIR/apply-kali-look.sh" ]] &&
+   bash "$SCRIPT_DIR/apply-kali-look.sh" --yes; then
+  log "Kali visual assets applied"
+else
+  warn "Kali theme not available; applying Materia/Papirus fallback"
+  xfset xsettings /Net/ThemeName string Materia-dark || true
+  xfset xsettings /Net/IconThemeName string Papirus-Dark || true
+  if [[ -d /usr/share/themes/Materia-dark/xfwm4 ]]; then
+    xfset xfwm4 /general/theme string Materia-dark || true
+  fi
 fi
 
-if ask 'Optionally install Brave from AUR (review the AUR build before accepting)?'; then
-    if command -v yay >/dev/null; then
-        yay -S --needed brave-bin
-    else
-        warn 'yay is not installed; skipped Brave. You can install it manually later.'
+if command -v lspci >/dev/null && lspci | grep -iq NVIDIA; then
+  if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
+    log "NVIDIA driver OK"
+  else
+    warn "NVIDIA detected but nvidia-smi failed. Check installed drivers manually."
+    if command -v nvidia-inst >/dev/null; then
+      nvidia-inst --test --prime --32 || true
     fi
+  fi
 fi
-
-log 'Finished — no reboot triggered.'
-cat <<'SUMMARY'
-NEXT STEPS:
-  1. Reboot if packages, graphics drivers, or zram settings need it.
-  2. Confirm the second SSD is mounted: findmnt /mnt/games
-  3. Steam > Settings > Storage > Add Drive > /mnt/games/SteamLibrary
-  4. Steam > Settings > Compatibility: enable Proton for other titles.
-  5. Example Steam per-game launch options: prime-run gamemoderun %command%
-  6. For exact Kali theme, use Kali's official theme sources manually.
-  7. Power settings: Xfce Settings > Power Manager; verify lid/sleep behavior.
-This script intentionally does not touch partitions, fstab, bootloader, or GPU modes.
-SUMMARY
+if [[ -f "$SCRIPT_DIR/doctor.sh" ]]; then
+  bash "$SCRIPT_DIR/doctor.sh" || warn "Some diagnostics need attention"
+fi
+log "Finished. Log: $LOG_FILE"
+echo "Log out / reboot before judging theme and zram."
+echo "Steam library: add /mnt/games/SteamLibrary from Steam > Settings > Storage."
+echo "For RTX 3050 games: prime-run gamemoderun %command%"
+echo "This setup did NOT change partitions, Windows, GRUB, fstab, or Nvidia modules."
