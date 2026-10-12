@@ -3,11 +3,13 @@
 set -Eeuo pipefail
 AUTO=0
 DEV=0
+NVIDIA_AUTO=0
 for arg in "$@"; do
   case "$arg" in
     --yes) AUTO=1 ;;
     --dev) DEV=1 ;;
-    --help|-h) echo "Usage: bash install-eos-xfce.sh [--yes] [--dev]"; exit 0 ;;
+    --nvidia) NVIDIA_AUTO=1 ;;
+    --help|-h) echo "Usage: bash install-eos-xfce.sh [--yes] [--dev] [--nvidia]"; exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -57,7 +59,7 @@ packages=(
   btop fastfetch gparted gvfs tumbler
   vlc mpv qbittorrent xarchiver
   cups system-config-printer avahi ipp-usb zram-generator
-  python python-pip nodejs npm
+  python python-pip nodejs npm flatpak
 )
 if [[ $DEV == 1 ]]; then
   packages+=(jdk-openjdk maven php composer dotnet-sdk docker docker-compose)
@@ -73,6 +75,27 @@ done
 if ((${#available[@]})); then
   log "Installing ${#available[@]} packages"
   sudo pacman -S --needed "${pacman_flags[@]}" "${available[@]}"
+fi
+
+# Google Chrome and Brave, as Flatpaks: no unattended AUR PKGBUILD execution.
+# Chrome on Flathub is community packaged (not Google-verified).
+log "Installing Chrome and Brave via Flathub (per-user)"
+if command -v flatpak >/dev/null; then
+  if flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo; then
+    for app in com.google.Chrome com.brave.Browser; do
+      if flatpak info "$app" >/dev/null 2>&1; then
+        log "$app already installed"
+      elif flatpak install --user -y --noninteractive flathub "$app"; then
+        log "$app installed"
+      else
+        warn "Failed to install $app; see log"
+      fi
+    done
+  else
+    warn "Could not add Flathub: Chrome and Brave skipped"
+  fi
+else
+  warn "Flatpak unavailable: Chrome and Brave skipped"
 fi
 
 for svc in cups.service avahi-daemon.service; do
@@ -163,9 +186,26 @@ if command -v lspci >/dev/null && lspci | grep -iq NVIDIA; then
   if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
     log "NVIDIA driver OK"
   else
-    warn "NVIDIA detected but nvidia-smi failed. Check installed drivers manually."
+    warn "NVIDIA detected but nvidia-smi failed."
     if command -v nvidia-inst >/dev/null; then
-      nvidia-inst --test --prime --32 || true
+      if [[ "$NVIDIA_AUTO" -eq 1 ]]; then
+        log "Requested NVIDIA installation: checking plan before applying"
+        if nvidia-inst --test --prime --32; then
+          log "Installing NVIDIA drivers via official EndeavourOS nvidia-inst"
+          if sudo nvidia-inst --prime --32; then
+            log "NVIDIA driver setup finished; reboot and verify with nvidia-smi"
+          else
+            warn "NVIDIA installation failed; see nvidia-inst output"
+          fi
+        else
+          warn "NVIDIA dry-run failed: driver NOT changed"
+        fi
+      else
+        warn "NVIDIA driver NOT installed automatically. Use --nvidia only after checking installer GPU support."
+        nvidia-inst --test --prime --32 || true
+      fi
+    else
+      warn "nvidia-inst missing: use EndeavourOS NVIDIA documentation; no blind driver installation"
     fi
   fi
 fi
@@ -176,4 +216,4 @@ log "Finished. Log: $LOG_FILE"
 echo "Log out / reboot before judging theme and zram."
 echo "Steam library: add /mnt/games/SteamLibrary from Steam > Settings > Storage."
 echo "For RTX 3050 games: prime-run gamemoderun %command%"
-echo "This setup did NOT change partitions, Windows, GRUB, fstab, or Nvidia modules."
+echo "No changes to partitions, Windows, GRUB, fstab. Nvidia modules changed only if --nvidia requested and needed."
