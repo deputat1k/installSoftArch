@@ -153,3 +153,27 @@ prime-run gamemoderun %command%
 - Перевір `findmnt /mnt/games`, `nvidia-smi`, Wi‑Fi, Bluetooth, принтер, sleep, заряд батареї та звук.
 - Встанови Steam-бібліотеку на другому SSD і спробуй кілька своїх ігор перед масовим завантаженням.
 - Скрипт перевірено на синтаксис `bash -n`, **не тестовано реально на твоєму ноутбуці**.
+
+---
+
+## АВТОМАТИЧНЕ ВСТАНОВЛЕННЯ НА ENDEAVOUROS XFCE (оновлено)
+
+Запускай лише **після** встановлення та входу в графічний Xfce **X11**, із підключеним інтернетом. Не через sudo. Перед запуском переглянь код у репозиторії.
+
+**Одна команда** — клонувати гілку XFCE і виконати автоматичне налаштування:
+
+```bash
+bash -c 'set -e; command -v git >/dev/null || sudo pacman -S --needed git; dir="$(mktemp -d)"; git clone --depth 1 --branch XFCE https://github.com/deputat1k/installSoftArch.git "$dir/installSoftArch"; cd "$dir/installSoftArch"; bash install-eos-xfce.sh --yes --dev'
+```
+
+Якщо не потрібні інструменти бекенду, прибери `--dev`. Без `--yes` pacman показуватиме запити на підтвердження. Під час запуску може знадобитися пароль sudo. `--yes` використовує pacman `--noconfirm`, тому перед запуском важливо ознайомитися з пакетами; не запускай, якщо є конфлікти пакетів або невирішені оновлення.
+
+**Що встановлюється:** Firefox, Telegram, Discord, OBS, Steam, Lutris, Wine/Winetricks, GameMode, MangoHud, Vulkan/Mesa, Xfce-утиліти, CUPS, VLC, MPV, qBittorrent, btop, fastfetch, Python, Node.js, npm. За `--dev` додаються Java JDK, Maven, PHP, Composer, .NET SDK, Docker CLI/Engine та Compose (Docker service спеціально не вмикається).
+
+**Що налаштовується:** multilib, повне оновлення системи, англійська/українська Alt+Shift, Super+W для шпалер (якщо не зайнята), zram за відсутності іншої конфігурації, служби друку. `apply-kali-look.sh` запускається **автоматично** і намагається встановити оригінальну тему Kali-Dark та іконки, а якщо GitLab/структура теми недоступні — застосовує Materia/Papirus як запасну тему. **Це не повний клон панелей і шпалер Kali.**
+
+Після установки запускається `doctor.sh` і звітує про стан частини компонентів. Логи: `~/.local/state/eos-xfce-setup/`. Для ручної діагностики: `bash doctor.sh`.
+
+**Не робить автоматично:** встановлення драйвера NVIDIA, форматування та монтування SSD, редагування EFI/GRUB/fstab, створення Steam-бібліотеки в клієнті Steam, зміну режиму MUX/GPU, повне копіювання панелей Kali. Ці речі потребують окремої перевірки. Не встановлює AUR/Brave без перегляду PKGBUILD; Brave навмисно виключений з автоматичного режиму.
+
+**Після виконання:** перезавантажся, перевір `nvidia-smi`, `findmnt /mnt/games` та тему через Xfce Settings. На реальному ASUS FX507ZC4 скрипт ще не перевірений; безумовну гарантію встановлення без помилок дати неможливо.
