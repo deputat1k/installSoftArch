@@ -1,30 +1,12 @@
 #!/usr/bin/env bash
-# Read-only post-install diagnostic. Never edits system configuration.
+# Read-only Kali Xfce appearance check
 set -u
-ok=0; warning=0
-good() { printf '[OK] %s\n' "$*"; ok=$((ok+1)); }
-note() { printf '[CHECK] %s\n' "$*"; warning=$((warning+1)); }
-for cmd in git steam lutris gamemoderun mangohud xfconf-query; do
-  command -v "$cmd" >/dev/null && good "$cmd installed" || note "$cmd missing (or no binary exposed)"
+for setting in 'xsettings /Net/ThemeName' 'xsettings /Net/IconThemeName' 'xfwm4 /general/theme'; do
+  read -r channel property <<< "$setting"
+  printf '%s: ' "$property"
+  xfconf-query -c "$channel" -p "$property" 2>/dev/null || echo 'missing'
 done
-theme="$(xfconf-query -c xsettings -p /Net/ThemeName 2>/dev/null || true)"
-case "$theme" in Kali-Dark|Materia-dark) good "Theme $theme" ;; *) note "Theme not applied ($theme)" ;; esac
-layout="$(xfconf-query -c keyboard-layout -p /Default/XkbLayout 2>/dev/null || true)"
-[[ "$layout" == us,ua ]] && good "Keyboard us,ua" || note "Keyboard layout: $layout"
-if lspci 2>/dev/null | grep -iq NVIDIA; then
-  if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1; then
-    good "NVIDIA driver responding"
-  else
-    note "NVIDIA detected; nvidia-smi not working (manual driver verification needed)"
-  fi
-fi
-if mountpoint -q /mnt/games; then good "/mnt/games mounted"; else note "/mnt/games not mounted; Steam storage setup remains manual"; fi
-if swapon --noheadings --show=NAME 2>/dev/null | grep -q '^/dev/zram'; then
-  good "zram active"
-elif [[ -f /etc/systemd/zram-generator.conf ]]; then
-  note "zram configured; reboot to activate"
-else
-  note "zram not configured"
-fi
-printf '\nDiagnostics: %s OK, %s items to check. No changes made.\n' "$ok" "$warning"
-exit 0
+[[ -d "$HOME/.local/share/themes/Kali-Dark" ]] && echo '[OK] Kali-Dark assets' || echo '[CHECK] Kali-Dark missing'
+[[ -f "$HOME/.local/share/backgrounds/kali-actiniaria.svg" ]] && echo '[OK] wallpaper' || echo '[CHECK] wallpaper missing'
+command -v xfce4-panel-profiles >/dev/null && echo '[OK] Panel Profiles' || echo '[CHECK] Panel Profiles missing'
+echo 'Note: working panel applets require a real Xfce session check.'
