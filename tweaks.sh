@@ -156,9 +156,9 @@ if [[ " ${installed_uuids[*]} " == *' dash-to-dock@micxgx.gmail.com '* ]]; then
       fi
     }
     dock_set dock-position BOTTOM
-    dock_set dock-fixed true
-    dock_set autohide false
-    dock_set intellihide false
+    dock_set dock-fixed false
+    dock_set autohide true
+    dock_set intellihide true
     dock_set dash-max-icon-size 46
     dock_set extend-height false
   else
@@ -193,6 +193,13 @@ PY
 say 'Disk space GUI tools'
 if command -v baobab >/dev/null; then say 'Open "Disk Usage Analyzer" from the applications menu to see used/free space'; fi
 if command -v gnome-disks >/dev/null; then say 'Open "Disks" to see SSD models, partitions and capacity'; fi
+say 'Installing Windows-like GNOME shortcuts'
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/windows-shortcuts.sh" ]]; then
+  bash "$(dirname "${BASH_SOURCE[0]}")/windows-shortcuts.sh" || warn 'Keyboard shortcuts could not be fully configured; see backup and log'
+else
+  warn 'windows-shortcuts.sh missing; shortcut setup skipped'
+fi
+
 say 'Verifying final configuration'
 [[ "$(gsettings get org.gnome.desktop.wm.preferences button-layout)" == *minimize,maximize,close* ]] && say 'Window buttons configured' || warn 'Window buttons not applied'
 for uuid in "${installed_uuids[@]}"; do
