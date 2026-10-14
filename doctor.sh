@@ -4,7 +4,7 @@ set -u
 ok=0; warn_count=0
 okmsg() { printf '[OK] %s\n' "$1"; ok=$((ok+1)); }
 warnmsg() { printf '[CHECK] %s\n' "$1"; warn_count=$((warn_count+1)); }
-for cmd in gsettings steam gamemoderun mangohud glxinfo vulkaninfo; do
+for cmd in gsettings steam mangohud wine winetricks glxinfo vulkaninfo; do
   if command -v "$cmd" >/dev/null 2>&1; then okmsg "$cmd"; else warnmsg "$cmd unavailable"; fi
 done
 if lspci 2>/dev/null | grep -qi NVIDIA; then
