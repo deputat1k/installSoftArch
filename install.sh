@@ -1,681 +1,248 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# Arch Linux + GNOME / ASUS TUF F15 i5-12500H + Intel + RTX 3050 Laptop.
+# Post-install apps, graphics, locale and desktop settings. Does not touch disks/bootloader.
+set -Eeuo pipefail
 
-# ============================================================
-# ARCH LINUX GNOME - PERSONAL SETUP SCRIPT
-# ============================================================
-#
-# Run this script as your normal user, NOT as root.
-#
-# Current setup:
-#   - Update Arch Linux
-#   - Enable multilib for Steam / 32-bit libraries
-#   - Install NVIDIA drivers for RTX 3050
-#   - Install Intel graphics / Vulkan support
-#   - Enable Ukrainian locale while keeping system language English
-#   - Add English + Ukrainian keyboard layouts
-#   - Set Alt+Shift as layout switch
-#   - Set GRUB timeout to 60 seconds
-#   - Enable NVIDIA DRM modesetting
-#   - Install Firefox, Brave, Telegram, Steam, OBS Studio, Discord
-#   - Prepare official Proton Experimental download through Steam
-#   - Install G-Helper Linux
-#   - Disable automatic screen blanking
-#   - Disable automatic idle suspend
-#   - Suspend when laptop lid is closed
-#   - Create ~/Pictures/Wallpaper
-#   - Create random wallpaper script
-#   - Configure Super+W for random wallpaper
-#   - Reboot automatically at the very end
-#
-# ============================================================
+AUTO=0; NO_NVIDIA=0; NO_GHELPER=0; NO_FLATPAK=0
+for arg in "$@"; do
+  case "$arg" in
+    --yes) AUTO=1 ;;
+    --no-nvidia) NO_NVIDIA=1 ;;
+    --no-ghelper) NO_GHELPER=1 ;;
+    --no-flatpak) NO_FLATPAK=1 ;;
+    -h|--help)
+      cat <<'HELP'
+Usage: bash install.sh [--yes] [--no-nvidia] [--no-ghelper] [--no-flatpak]
+  --yes           Allow pacman to confirm package transactions automatically.
+  --no-nvidia     Skip NVIDIA driver packages (use if already managing GPU yourself).
+  --no-ghelper    Skip G-Helper Linux AppImage installation.
+  --no-flatpak    Skip Brave/Chrome Flatpaks.
+Run as a regular user after login to a working Arch Linux GNOME session.
+HELP
+      exit 0 ;;
+    *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
+  esac
+done
 
-set -euo pipefail
+[[ $EUID -ne 0 ]] || { echo 'Run as a normal user, NOT with sudo.' >&2; exit 1; }
+[[ -r /etc/os-release ]] || { echo '/etc/os-release missing' >&2; exit 1; }
+# shellcheck source=/dev/null
+source /etc/os-release
+[[ ${ID:-} == arch ]] || { echo 'Only Arch Linux is supported (not Ubuntu/Fedora).' >&2; exit 1; }
+command -v pacman >/dev/null || { echo 'pacman missing' >&2; exit 1; }
+command -v gsettings >/dev/null || { echo 'GNOME gsettings missing' >&2; exit 1; }
+case "${XDG_CURRENT_DESKTOP:-}" in
+  *GNOME*|*gnome*) ;;
+  *) echo 'Log into GNOME first (not KDE/Xfce/TTY).' >&2; exit 1 ;;
+esac
+[[ -n ${DBUS_SESSION_BUS_ADDRESS:-} ]] || { echo 'No GNOME user D-Bus session.' >&2; exit 1; }
 
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/installSoftArch"
+mkdir -p "$state_dir"
+log_file="$state_dir/arch-gnome-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$log_file") 2>&1
+log() { printf '\n==> %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+trap 'code=$?; printf "[ERROR] line %s, code %s. Log: %s\n" "$LINENO" "$code" "$log_file" >&2; exit "$code"' ERR
 
-# ============================================================
-# OUTPUT HELPERS
-# ============================================================
-
-print_step() {
-    echo
-    echo "============================================================"
-    echo " $1"
-    echo "============================================================"
-}
-
-print_info() {
-    echo "[INFO] $1"
-}
-
-print_success() {
-    echo "[ OK ] $1"
-}
-
-
-# ============================================================
-# SAFETY CHECKS
-# ============================================================
-
-if [ "$EUID" -eq 0 ]; then
-    echo
-    echo "Do NOT run this script as root."
-    echo
-    echo "Run it as your normal user:"
-    echo "    ./install.sh"
-    echo
-    exit 1
+if [[ $AUTO -ne 1 ]]; then
+  echo 'This changes installed packages, GNOME keyboard/shortcuts and system locale.'
+  echo 'It does NOT partition/format disks, modify GRUB/EFI/fstab or force a reboot.'
+  read -r -p 'Proceed? [y/N]: ' answer
+  [[ $answer == [Yy] || $answer == [Yy][Ee][Ss] ]] || exit 0
 fi
-
-
-# ============================================================
-# SUDO
-# ============================================================
-
-print_step "Checking sudo access"
-
 sudo -v
 
-print_success "Sudo access confirmed."
+flags=()
+[[ $AUTO == 1 ]] && flags+=(--noconfirm)
 
-
-# ============================================================
-# UPDATE SYSTEM
-# ============================================================
-
-print_step "Updating Arch Linux"
-
-sudo pacman -Syu --noconfirm
-
-print_success "System updated."
-
-
-# ============================================================
-# ENABLE MULTILIB
-# ============================================================
-#
-# Required for Steam and other 32-bit applications/libraries.
-#
-# Desired configuration:
-#   [multilib]
-#   Include = /etc/pacman.d/mirrorlist
-#
-# ============================================================
-
-print_step "Enabling multilib repository"
-
-if grep -q '^\[multilib\]' /etc/pacman.conf; then
-    print_info "Multilib is already enabled."
-else
-    sudo sed -i \
-        '/^#\[multilib\]/,/^#Include = \/etc\/pacman.d\/mirrorlist/ s/^#//' \
-        /etc/pacman.conf
-    print_success "Multilib enabled."
+log 'Enable [multilib] (required for Steam and NVIDIA 32-bit libraries)'
+if ! pacman-conf --repo-list | grep -qx multilib; then
+  backup="/etc/pacman.conf.before-installSoftArch-$(date +%Y%m%d-%H%M%S)"
+  sudo cp -a /etc/pacman.conf "$backup"
+  sudo sed -i -E '/^[[:space:]]*#[[:space:]]*\[multilib\][[:space:]]*$/,/^[[:space:]]*#[[:space:]]*Include[[:space:]]*=[[:space:]]*\/etc\/pacman.d\/mirrorlist[[:space:]]*$/ s/^[[:space:]]*#[[:space:]]*//' /etc/pacman.conf
+  if ! pacman-conf --repo-list | grep -qx multilib; then
+    echo "Could not enable multilib. Restore/review $backup manually." >&2
+    exit 1
+  fi
 fi
-
-
-# ============================================================
-# FULL UPDATE AFTER MULTILIB
-# ============================================================
-#
-# Do a complete upgrade again after enabling multilib.
-# Avoid a partial-upgrade state.
-# ============================================================
-
-print_step "Refreshing package databases and completing full upgrade"
-
-sudo pacman -Syu --noconfirm
-
-print_success "Package databases refreshed and system fully upgraded."
-
-
-# ============================================================
-# CORE DEPENDENCIES
-# ============================================================
-
-print_step "Installing core dependencies"
-
-sudo pacman -S --needed --noconfirm \
-    base-devel \
-    git \
-    curl \
-    wget \
-    unzip \
-    xdg-utils \
-    jq \
-    libnotify
-
-print_success "Core dependencies installed."
-
-
-# ============================================================
-# GRAPHICS DRIVERS
-# ============================================================
-#
-# Laptop hardware:
-#   - Intel Core i5-12500H
-#   - NVIDIA RTX 3050
-#
-# NVIDIA:
-#   nvidia-open
-#   nvidia-utils
-#   lib32-nvidia-utils
-#   nvidia-prime
-#
-# Intel / Mesa / Vulkan:
-#   mesa
-#   lib32-mesa
-#   vulkan-intel
-#   lib32-vulkan-intel
-#   vulkan-icd-loader
-#   lib32-vulkan-icd-loader
-#
-# ============================================================
-
-print_step "Installing graphics drivers"
-
-sudo pacman -S --needed --noconfirm \
-    nvidia-open \
-    nvidia-utils \
-    lib32-nvidia-utils \
-    nvidia-prime \
-    mesa \
-    lib32-mesa \
-    vulkan-intel \
-    lib32-vulkan-intel \
-    vulkan-icd-loader \
-    lib32-vulkan-icd-loader \
-    libva \
-    lib32-libva
-
-print_success "Graphics drivers installed."
-
-
-# ============================================================
-# NVIDIA DRM MODESETTING
-# ============================================================
-
-print_step "Configuring NVIDIA DRM modesetting"
-
-if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' /etc/default/grub; then
-    if ! grep -q 'nvidia_drm.modeset=1' /etc/default/grub; then
-        sudo sed -i \
-            's/^GRUB_CMDLINE_LINUX_DEFAULT="\([^"]*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 nvidia_drm.modeset=1"/' \
-            /etc/default/grub
-    fi
-else
-    echo 'GRUB_CMDLINE_LINUX_DEFAULT="nvidia_drm.modeset=1"' \
-        | sudo tee -a /etc/default/grub > /dev/null
-fi
-
-print_success "NVIDIA DRM modesetting configured."
-
-
-# ============================================================
-# LOCALES
-# ============================================================
-
-print_step "Configuring locales"
-
-if grep -q '^#uk_UA.UTF-8 UTF-8' /etc/locale.gen; then
-    sudo sed -i \
-        's/^#uk_UA.UTF-8 UTF-8/uk_UA.UTF-8 UTF-8/' \
-        /etc/locale.gen
-fi
-
-sudo locale-gen
-
-# Keep the graphical interface in English.
-sudo localectl set-locale LANG=en_US.UTF-8
-
-print_success "uk_UA.UTF-8 enabled."
-print_success "System language remains English."
-
-
-# ============================================================
-# KEYBOARD LAYOUTS
-# ============================================================
-
-print_step "Configuring keyboard layouts"
-
-gsettings set \
-    org.gnome.desktop.input-sources sources \
-    "[('xkb', 'us'), ('xkb', 'ua')]"
-
-gsettings set \
-    org.gnome.desktop.input-sources xkb-options \
-    "['grp:alt_shift_toggle']"
-
-print_success "English + Ukrainian layouts configured."
-print_success "Alt+Shift switching configured."
-
-
-# ============================================================
-# GRUB TIMEOUT
-# ============================================================
-
-print_step "Configuring GRUB timeout"
-
-if grep -q '^GRUB_TIMEOUT=' /etc/default/grub; then
-    sudo sed -i \
-        's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=60/' \
-        /etc/default/grub
-else
-    echo 'GRUB_TIMEOUT=60' \
-        | sudo tee -a /etc/default/grub > /dev/null
-fi
-
-print_success "GRUB timeout set to 60 seconds."
-
-
-# ============================================================
-# REBUILD GRUB
-# ============================================================
-
-print_step "Rebuilding GRUB configuration"
-
-sudo grub-mkconfig -o /boot/grub/grub.cfg
-
-print_success "GRUB configuration rebuilt."
-
-
-# ============================================================
-# OFFICIAL APPLICATIONS
-# ============================================================
-
-print_step "Installing official applications"
-
-sudo pacman -S --needed --noconfirm \
-    firefox \
-    telegram-desktop \
-    steam \
-    obs-studio \
-    discord
-
-print_success "Firefox installed."
-print_success "Telegram Desktop installed."
-print_success "Steam installed."
-print_success "OBS Studio installed."
-print_success "Discord installed."
-
-
-# ============================================================
-# AUR PACKAGE INSTALLER
-# ============================================================
-#
-# We install only the AUR packages we currently need and do not
-# add an AUR helper such as yay to the system.
-#
-# ============================================================
-
-install_aur_package() {
-    local package="$1"
-    local aur_dir
-
-    print_step "Installing AUR package: $package"
-
-    aur_dir="$(mktemp -d)"
-
-    git clone \
-        "https://aur.archlinux.org/${package}.git" \
-        "$aur_dir/$package"
-
-    cd "$aur_dir/$package"
-
-    makepkg -si --noconfirm
-
-    cd "$HOME"
-
-    rm -rf "$aur_dir"
-
-    print_success "$package installed."
-}
-
-
-# ============================================================
-# BRAVE BROWSER
-# ============================================================
-
-install_aur_package "brave-bin"
-
-
-# ============================================================
-# PROTON EXPERIMENTAL
-# ============================================================
-#
-# Valve distributes Proton Experimental through Steam itself.
-# Proton Experimental is Steam App ID 1493710.
-#
-# We prepare a one-shot GNOME autostart action that tells Steam
-# to install/download the official Proton Experimental tool on
-# the first graphical login after this setup. This avoids trying
-# to automate Steam account login inside the root/noninteractive
-# install process.
-#
-# ============================================================
-
-print_step "Preparing Proton Experimental"
-
-PROTON_AUTOSTART_DIR="$HOME/.config/autostart"
-PROTON_AUTOSTART_SCRIPT="$HOME/.local/bin/install-proton-experimental"
-PROTON_DESKTOP_FILE="$PROTON_AUTOSTART_DIR/install-proton-experimental.desktop"
-
-mkdir -p "$PROTON_AUTOSTART_DIR"
-mkdir -p "$HOME/.local/bin"
-
-cat > "$PROTON_AUTOSTART_SCRIPT" <<'EOF'
-#!/bin/bash
-
-MARKER="$HOME/.local/share/proton-experimental-install-done"
-STEAM_URL="steam://install/1493710"
-
-if [ -f "$MARKER" ]; then
-    exit 0
-fi
-
-mkdir -p "$HOME/.local/share"
-
-# Give the Steam client a moment to start if it is not already running.
-if command -v steam >/dev/null 2>&1; then
-    steam -silent >/dev/null 2>&1 &
-fi
-
-sleep 15
-
-# Ask Steam to install the official Proton Experimental tool.
-xdg-open "$STEAM_URL" >/dev/null 2>&1 || true
-
-# Do not repeat the request on every login.
-touch "$MARKER"
-rm -f "$HOME/.config/autostart/install-proton-experimental.desktop"
-EOF
-
-chmod +x "$PROTON_AUTOSTART_SCRIPT"
-
-cat > "$PROTON_DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Install Proton Experimental
-Comment=Trigger Steam to download Valve Proton Experimental
-Exec=$PROTON_AUTOSTART_SCRIPT
-Terminal=false
-X-GNOME-Autostart-enabled=true
-EOF
-
-print_success "Proton Experimental download trigger prepared."
-print_info "Steam will be asked to download the official Proton Experimental tool (App ID 1493710) after the first GNOME login."
-
-
-# ============================================================
-# G-HELPER LINUX
-# ============================================================
-#
-# Linux port for ASUS/TUF/ROG hardware.
-# ============================================================
-
-print_step "Installing G-Helper Linux"
-
-curl -fsSL \
-    https://raw.githubusercontent.com/utajum/g-helper-linux/master/install/install.sh \
-    | sudo bash
-
-print_success "G-Helper Linux installed."
-
-
-# ============================================================
-# SCREEN BLANKING / IDLE SUSPEND
-# ============================================================
-#
-# No automatic screen blanking and no automatic suspend caused
-# by inactivity.
-#
-# Closing the lid is configured separately below and WILL suspend.
-#
-# ============================================================
-
-print_step "Disabling automatic screen blanking and idle suspend"
-
-# Never blank the screen because of inactivity.
-gsettings set \
-    org.gnome.desktop.session \
-    idle-delay \
-    0
-
-# Prevent GNOME from dimming the screen before blanking.
-gsettings set \
-    org.gnome.settings-daemon.plugins.power \
-    idle-dim \
-    false
-
-# Never automatically suspend because of inactivity.
-gsettings set \
-    org.gnome.settings-daemon.plugins.power \
-    sleep-inactive-ac-type \
-    'nothing'
-
-gsettings set \
-    org.gnome.settings-daemon.plugins.power \
-    sleep-inactive-battery-type \
-    'nothing'
-
-gsettings set \
-    org.gnome.settings-daemon.plugins.power \
-    sleep-inactive-ac-timeout \
-    0
-
-gsettings set \
-    org.gnome.settings-daemon.plugins.power \
-    sleep-inactive-battery-timeout \
-    0
-
-print_success "Automatic screen blanking disabled."
-print_success "Automatic idle suspend disabled."
-
-
-# ============================================================
-# LAPTOP LID -> SUSPEND
-# ============================================================
-#
-# systemd-logind handles lid events at the system level.
-#
-# ============================================================
-
-print_step "Configuring laptop lid suspend"
-
-LOGIND_FILE="/etc/systemd/logind.conf"
-
-set_logind_option() {
-    local option="$1"
-    local value="$2"
-
-    if grep -Eq "^[#[:space:]]*${option}=" "$LOGIND_FILE"; then
-        sudo sed -i \
-            -E "s|^[#[:space:]]*${option}=.*|${option}=${value}|" \
-            "$LOGIND_FILE"
-    else
-        echo "${option}=${value}" \
-            | sudo tee -a "$LOGIND_FILE" > /dev/null
-    fi
-}
-
-set_logind_option "HandleLidSwitch" "suspend"
-set_logind_option "HandleLidSwitchExternalPower" "suspend"
-set_logind_option "HandleLidSwitchDocked" "suspend"
-
-print_success "Laptop lid -> suspend configured."
-
-
-# ============================================================
-# WALLPAPER DIRECTORY
-# ============================================================
-
-print_step "Creating wallpaper directory"
-
-WALLPAPER_DIR="$HOME/Pictures/Wallpaper"
-
-mkdir -p "$WALLPAPER_DIR"
-mkdir -p "$HOME/.local/bin"
-
-print_success "Created $WALLPAPER_DIR"
-
-
-# ============================================================
-# RANDOM WALLPAPER SCRIPT
-# ============================================================
-
-print_step "Creating random wallpaper script"
-
-WALLPAPER_SCRIPT="$HOME/.local/bin/random-wallpaper"
-
-cat > "$WALLPAPER_SCRIPT" <<'EOF'
-#!/bin/bash
-
-WALLPAPER_DIR="$HOME/Pictures/Wallpaper"
-
-mapfile -t WALLPAPERS < <(
-    find "$WALLPAPER_DIR" -maxdepth 1 -type f \
-        \( \
-            -iname "*.png" \
-            -o -iname "*.jpg" \
-            -o -iname "*.jpeg" \
-            -o -iname "*.webp" \
-        \) \
-        | sort
+log 'Full Arch Linux update'
+sudo pacman -Syu "${flags[@]}"
+
+log 'Core tools, Intel graphics, Vulkan, gaming and original apps'
+packages=(
+  base-devel git curl wget jq unzip xdg-utils libnotify python
+  pciutils usbutils linux-firmware intel-ucode sof-firmware
+  bluez bluez-utils
+  mesa lib32-mesa vulkan-intel lib32-vulkan-intel
+  vulkan-icd-loader lib32-vulkan-icd-loader
+  libva lib32-libva intel-media-driver libva-utils mesa-utils vulkan-tools
+  firefox telegram-desktop steam obs-studio discord
+  gamemode lib32-gamemode mangohud lib32-mangohud
+  lutris wine winetricks vlc mpv
+  gnome-tweaks dconf-editor flatpak fuse2
 )
-
-if [ "${#WALLPAPERS[@]}" -eq 0 ]; then
-    notify-send \
-        "Wallpaper" \
-        "No wallpapers found in ~/Pictures/Wallpaper"
-    exit 0
+# Abort on a missing official package instead of falsely claiming success.
+sudo pacman -S --needed "${flags[@]}" "${packages[@]}"
+if systemctl list-unit-files bluetooth.service --no-legend 2>/dev/null | grep -q '^bluetooth.service'; then
+  sudo systemctl enable --now bluetooth.service || warn 'Bluetooth service could not start'
 fi
 
-RANDOM_WALLPAPER="${WALLPAPERS[$RANDOM % ${#WALLPAPERS[@]}]}"
-WALLPAPER_URI="file://$RANDOM_WALLPAPER"
+if [[ $NO_NVIDIA == 0 ]] && lspci -nn | grep -qi NVIDIA; then
+  log 'NVIDIA hybrid graphics: PRIME and 32-bit userspace'
+  existing_modules=(nvidia nvidia-dkms nvidia-lts nvidia-open nvidia-open-dkms nvidia-open-lts)
+  found=0
+  for pkg in "${existing_modules[@]}"; do
+    if pacman -Qq "$pkg" >/dev/null 2>&1; then
+      log "Existing NVIDIA kernel package: $pkg (preserving it)"
+      found=1
+      break
+    fi
+  done
+  if [[ $found == 0 ]]; then
+    log 'Install NVIDIA open DKMS module for RTX 3050 (Ampere)'
+    kernels=()
+    for pair in 'linux:linux-headers' 'linux-lts:linux-lts-headers' 'linux-zen:linux-zen-headers' 'linux-hardened:linux-hardened-headers'; do
+      kernel=${pair%%:*}; headers=${pair#*:}
+      if pacman -Qq "$kernel" >/dev/null 2>&1; then kernels+=("$headers"); fi
+    done
+    if (("${#kernels[@]}" == 0)); then
+      warn 'Unknown kernel: not installing NVIDIA kernel module automatically.'
+    else
+      sudo pacman -S --needed "${flags[@]}" "${kernels[@]}" dkms nvidia-open-dkms nvidia-utils
+    fi
+  fi
+  # PRIME and 32-bit Vulkan, required for many Steam/Proton titles.
+  if pacman -Qq nvidia-utils >/dev/null 2>&1; then
+    sudo pacman -S --needed "${flags[@]}" nvidia-prime nvidia-settings lib32-nvidia-utils
+  else
+    warn 'nvidia-utils absent. Check driver installation before enabling 32-bit NVIDIA support.'
+  fi
+  warn 'NVIDIA changes need a reboot. Verify with nvidia-smi and prime-run glxinfo -B.'
+else
+  log 'NVIDIA driver step skipped (GPU not detected or --no-nvidia)'
+fi
 
-gsettings set \
-    org.gnome.desktop.background \
-    picture-uri \
-    "$WALLPAPER_URI"
+log 'US + Ukrainian locale and GNOME Alt+Shift layout switching'
+for locale in en_US.UTF-8 uk_UA.UTF-8; do
+  if grep -Eq "^[#[:space:]]*${locale}[[:space:]]+UTF-8[[:space:]]*$" /etc/locale.gen; then
+    sudo sed -i -E "s/^[#[:space:]]*(${locale}[[:space:]]+UTF-8)[[:space:]]*$/\1/" /etc/locale.gen
+  fi
+done
+sudo locale-gen
+sudo localectl set-locale LANG=en_US.UTF-8
+sudo timedatectl set-timezone Europe/Kyiv
+if gsettings writable org.gnome.desktop.input-sources sources | grep -qx true; then
+  gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('xkb', 'ua')]"
+  gsettings set org.gnome.desktop.input-sources xkb-options "['grp:alt_shift_toggle']"
+else
+  warn 'GNOME keyboard sources are managed externally; change layout in Settings.'
+fi
 
-gsettings set \
-    org.gnome.desktop.background \
-    picture-uri-dark \
-    "$WALLPAPER_URI"
-
-notify-send \
-    "Wallpaper changed" \
-    "$(basename "$RANDOM_WALLPAPER")"
-EOF
-
-chmod +x "$WALLPAPER_SCRIPT"
-
-print_success "Random wallpaper script created."
-
-
-# ============================================================
-# SUPER + W
-# ============================================================
-#
-# Configure one shortcut only: Super+W
-#
-# Preserve any existing custom GNOME keybindings and replace only
-# our own entry if the script is run again.
-# ============================================================
-
-print_step "Configuring Super+W wallpaper shortcut"
-
-CUSTOM_KEYBINDING_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/random-wallpaper/"
-CUSTOM_KEYBINDING_KEY="org.gnome.settings-daemon.plugins.media-keys"
-CUSTOM_SCHEMA="org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_KEYBINDING_PATH"
-
-python - "$CUSTOM_KEYBINDING_KEY" "$CUSTOM_KEYBINDING_PATH" "$WALLPAPER_SCRIPT" <<'PY'
+log 'Random wallpaper via Super+W; keep existing GNOME custom shortcuts'
+mkdir -p "$HOME/.local/bin" "$HOME/Pictures/Wallpaper"
+cat > "$HOME/.local/bin/random-wallpaper-gnome" <<'WALL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+folder="$HOME/Pictures/Wallpaper"
+mapfile -d '' -t files < <(find "$folder" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) -print0)
+if (("${#files[@]}" == 0)); then
+  command -v notify-send >/dev/null && notify-send 'Wallpaper' 'Add photos to ~/Pictures/Wallpaper'
+  exit 0
+fi
+chosen="${files[RANDOM % ${#files[@]}]}"
+uri="$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$chosen")"
+gsettings set org.gnome.desktop.background picture-uri "$uri"
+gsettings set org.gnome.desktop.background picture-uri-dark "$uri"
+command -v notify-send >/dev/null && notify-send 'Wallpaper changed' "$(basename "$chosen")" || true
+WALL
+chmod +x "$HOME/.local/bin/random-wallpaper-gnome"
+python - "$HOME/.local/bin/random-wallpaper-gnome" <<'PY'
 import ast
 import subprocess
 import sys
 
-schema, our_path, command = sys.argv[1], sys.argv[2], sys.argv[3]
-
-result = subprocess.run(
-    ["gsettings", "get", schema, "custom-keybindings"],
-    text=True,
-    capture_output=True,
-    check=True,
-)
-
-raw = result.stdout.strip()
-
+schema = 'org.gnome.settings-daemon.plugins.media-keys'
+path = '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/random-wallpaper/'
+custom = 'org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:' + path
+cmd = sys.argv[1]
+raw = subprocess.check_output(['gsettings', 'get', schema, 'custom-keybindings'], text=True).strip()
+if raw.startswith('@as '):
+    raw = raw[4:]
 try:
-    existing = ast.literal_eval(raw)
-except (ValueError, SyntaxError):
-    existing = []
-
-if not isinstance(existing, list):
-    existing = []
-
-existing = [item for item in existing if item != our_path]
-existing.append(our_path)
-
-subprocess.run(
-    ["gsettings", "set", schema, "custom-keybindings", str(existing)],
-    check=True,
-)
+    entries = ast.literal_eval(raw)
+except (ValueError, SyntaxError) as exc:
+    raise SystemExit(f'Cannot safely read existing shortcuts: {raw!r}; {exc}')
+if not isinstance(entries, list) or not all(isinstance(x, str) for x in entries):
+    raise SystemExit('Invalid GNOME shortcut list; preserving existing settings')
+if path not in entries:
+    entries.append(path)
+    subprocess.run(['gsettings', 'set', schema, 'custom-keybindings', str(entries)], check=True)
+for key, val in [('name', 'Random Wallpaper'), ('command', cmd), ('binding', '<Super>w')]:
+    subprocess.run(['gsettings', 'set', custom, key, val], check=True)
 PY
 
-gsettings set \
-    "$CUSTOM_SCHEMA" \
-    name \
-    "Random Wallpaper"
+if [[ $NO_FLATPAK == 0 ]]; then
+  log 'Brave and Google Chrome Flatpaks (community Flathub builds)'
+  if flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo; then
+    for app in com.brave.Browser com.google.Chrome; do
+      if flatpak info --user "$app" >/dev/null 2>&1; then
+        log "Already installed: $app"
+      elif flatpak install --user --noninteractive -y flathub "$app"; then
+        log "Installed: $app"
+      else
+        warn "Flatpak install failed: $app"
+      fi
+    done
+  else
+    warn 'Flathub unavailable: Brave/Chrome not installed'
+  fi
+fi
 
-gsettings set \
-    "$CUSTOM_SCHEMA" \
-    command \
-    "$WALLPAPER_SCRIPT"
+if [[ $NO_GHELPER == 0 ]]; then
+  log 'G-Helper Linux for ASUS: download verified upstream AppImage and udev rules'
+  temp_dir="$(mktemp -d)"
+  if curl -fsSL --retry 2 --max-time 45 'https://api.github.com/repos/utajum/g-helper-linux/releases/latest' -o "$temp_dir/release.json"; then
+    for asset_name in GHelper-x86_64.AppImage 90-ghelper.rules; do
+      asset_url="$(jq -r --arg name "$asset_name" '.assets[] | select(.name==$name) | .browser_download_url' "$temp_dir/release.json" | head -n1)"
+      digest="$(jq -r --arg name "$asset_name" '.assets[] | select(.name==$name) | .digest // empty' "$temp_dir/release.json" | head -n1)"
+      [[ "$digest" == sha256:* && "$asset_url" == https://github.com/utajum/g-helper-linux/releases/download/* ]] || { warn "$asset_name: missing trusted release checksum/URL"; continue; }
+      if ! curl -fL --retry 2 --max-time 300 "$asset_url" -o "$temp_dir/$asset_name"; then
+        warn "Download failed: $asset_name"; continue
+      fi
+      if ! printf '%s  %s\n' "${digest#sha256:}" "$temp_dir/$asset_name" | sha256sum --check --status; then
+        warn "SHA256 failed: $asset_name. Not installing."; continue
+      fi
+      if [[ "$asset_name" == GHelper-x86_64.AppImage ]]; then
+        mkdir -p "$HOME/.local/opt/ghelper" "$HOME/.local/share/applications"
+        install -m755 "$temp_dir/$asset_name" "$HOME/.local/opt/ghelper/GHelper-x86_64.AppImage"
+        cat > "$HOME/.local/share/applications/ghelper-linux.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=G-Helper Linux
+Exec=$HOME/.local/opt/ghelper/GHelper-x86_64.AppImage
+Icon=utilities-system-monitor
+Categories=System;Settings;
+Terminal=false
+DESKTOP
+      else
+        sudo install -m644 "$temp_dir/$asset_name" /etc/udev/rules.d/90-ghelper.rules
+        sudo udevadm control --reload-rules
+      fi
+      log "Verified and installed: $asset_name"
+    done
+  else
+    warn 'GitHub release API not available; skipping G-Helper'
+  fi
+  rm -rf -- "$temp_dir"
+fi
 
-gsettings set \
-    "$CUSTOM_SCHEMA" \
-    binding \
-    "<Super>w"
+if [[ -f "$(dirname "${BASH_SOURCE[0]}")/doctor.sh" ]]; then
+  log 'Read-only system check'
+  bash "$(dirname "${BASH_SOURCE[0]}")/doctor.sh" || warn 'Diagnostics flagged some items'
+fi
 
-print_success "Super+W configured."
-
-
-# ============================================================
-# FINAL MESSAGE
-# ============================================================
-
-print_step "SETUP COMPLETED"
-
-echo
-echo "Installed:"
-echo "  - NVIDIA RTX 3050 driver"
-echo "  - Intel graphics/Vulkan support"
-echo "  - Firefox"
-echo "  - Brave"
-echo "  - Telegram Desktop"
-echo "  - Steam + multilib"
-echo "  - OBS Studio"
-echo "  - Discord"
-echo "  - G-Helper Linux"
-echo
-echo "Configured:"
-echo "  - English + Ukrainian layouts"
-echo "  - Alt+Shift switching"
-echo "  - Ukrainian locale"
-echo "  - GRUB timeout: 60 seconds"
-echo "  - NVIDIA DRM modesetting"
-echo "  - No automatic idle screen blanking"
-echo "  - No automatic idle suspend"
-echo "  - Lid close -> suspend"
-echo "  - ~/Pictures/Wallpaper"
-echo "  - Super+W -> random wallpaper"
-echo "  - Proton Experimental download trigger"
-echo
-echo "============================================================"
-echo
-echo "Everything is ready."
-echo "The computer will reboot automatically in 10 seconds."
-echo
-
-sleep 10
-
-sudo reboot
+log "Finished. Log: $log_file"
+printf '%s\n' 'Reboot manually, then check NVIDIA, Wi-Fi, Bluetooth, sound and Steam.'
+printf '%s\n' 'Steam: log in, then enable Compatibility / Proton Experimental as needed.'
+printf '%s\n' 'No disk, GRUB, EFI, MUX, lid-power or automatic reboot changes were made.'
