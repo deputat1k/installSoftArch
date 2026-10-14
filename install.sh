@@ -78,8 +78,8 @@ packages=(
   vulkan-icd-loader lib32-vulkan-icd-loader
   libva lib32-libva intel-media-driver libva-utils mesa-utils vulkan-tools
   firefox telegram-desktop steam obs-studio discord
-  gamemode lib32-gamemode mangohud lib32-mangohud
-  lutris wine winetricks vlc mpv
+  mangohud lib32-mangohud
+  wine winetricks vlc mpv
   gnome-tweaks dconf-editor flatpak fuse2
 )
 # Abort on a missing official package instead of falsely claiming success.
