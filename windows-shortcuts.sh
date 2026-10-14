@@ -45,7 +45,9 @@ def norm(a):
     return mods,re.sub('<[^>]+>','',a).lower()
 existing={}
 for schema in (s,w,m,p,'org.gnome.mutter.wayland.keybindings'):
-    for key in execv('gsettings','list-keys',schema).splitlines():
+    try: keys=execv('gsettings','list-keys',schema).splitlines()
+    except subprocess.CalledProcessError: continue
+    for key in keys:
         try:
             value=parse(execv('gsettings','get',schema,key))
             if isinstance(value,list) and all(isinstance(x,str) for x in value):
